@@ -20,14 +20,16 @@ from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.manifold import TSNE
 from keras import losses
 from keras.models import Model
-from keras.layers import Input, Dense, Flatten, Reshape, Lambda, Layer
-from keras.layers.convolutional import Conv1D, Conv2D, Conv2DTranspose
-from keras.layers.convolutional import MaxPooling1D, MaxPooling2D, UpSampling1D, UpSampling2D
+from keras.layers import Input, Dense, Flatten, Reshape, Activation, Lambda, Layer
+from keras.layers.convolutional import Conv2D, Conv2DTranspose
+from keras.layers.convolutional import MaxPooling2D, UpSampling2D
+from keras.layers.normalization import BatchNormalization
+from keras.layers.advanced_activations import LeakyReLU
 from keras.utils import plot_model
 from keras.optimizers import *
 from keras import backend as K
 K.set_image_data_format('channels_last')
-from scipy.optimize import linear_sum_assignment
+from sklearn.utils.linear_assignment_ import linear_assignment
 
 
 
@@ -84,7 +86,6 @@ def denormalize_data(data, min_data, max_data, a=0, b=1):
 
 
 def cluster_acc(y_true, y_pred):
-    from sklearn.utils.linear_assignment_ import linear_assignment
     assert y_pred.size == y_true.size
     D = max(y_pred.max(), y_true.max()) + 1
     w = np.zeros((D, D))
@@ -106,15 +107,17 @@ class KLDivergenceLossLayer(Layer):
 
 
 # build VAE network
-def build_vae(n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3):
+def build_vae(n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3, leaky_relu_alpha=0.2):
     opt = Adam(lr=lr)
     # encoder
     vae_input = Input(shape=(n_row, n_col, n_chn))
-    x = Conv2D(n_filters[0], (3, 3), padding='same', activation='relu')(vae_input)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-    x = Conv2D(n_filters[1], (3, 3), padding='same', activation='relu')(x)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-    shapeBeforeFlatten = x._keras_shape[1:]
+    x = Conv2D(n_filters[0], (3, 3), strides=2, padding='same')(vae_input)
+    x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(alpha=leaky_relu_alpha)(x)
+    x = Conv2D(n_filters[1], (3, 3), strides=2, padding='same')(x)
+    x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(alpha=leaky_relu_alpha)(x)
+    shape_before_flatten = x._keras_shape[1:]
     x = Flatten()(x)
     x = Dense(1024, activation='relu')(x)
     z_mean = Dense(output_size, activation='linear', name='z_mean')(x)  # mean of z
@@ -123,23 +126,29 @@ def build_vae(n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3):
     z = Lambda(sample_z, output_shape=(output_size,), name='z')([z_mean, z_log_var])  # reparametrization
     encoder = Model(vae_input, z_mean)
 
-    # decoder
+    # define decoder/generator layers
     decoder_hidden = Dense(1024, activation='relu')
-    decoder_expand = Dense(np.prod(shapeBeforeFlatten), activation='relu')
-    decoder_reshape = Reshape(shapeBeforeFlatten)
-    decoder_conv_1 = Conv2D(n_filters[1], (3, 3), padding='same', activation='relu')
-    decoder_upsample_1 = UpSampling2D((2, 2))
-    decoder_conv_2 = Conv2D(n_filters[0], (3, 3), padding='same', activation='relu')
-    decoder_upsample_2 = UpSampling2D((2, 2))
-    decoder_conv_3 = Conv2D(n_chn, (3, 3), padding='same', activation='sigmoid')  # output in [0, 1]
+    decoder_expand = Dense(np.prod(shape_before_flatten), activation='relu')
+    decoder_reshape = Reshape(shape_before_flatten)
+    decoder_deconv_1 = Conv2DTranspose(n_filters[1], (3, 3), strides=2, padding='same')
+    decoder_bn_1 = BatchNormalization(axis=-1)
+    decoder_actv_1 = Activation('relu')
+    decoder_deconv_2 = Conv2DTranspose(n_filters[0], (3, 3), strides=2, padding='same')
+    decoder_bn_2 = BatchNormalization(axis=-1)
+    decoder_actv_2 = Activation('relu')
+    decoder_deconv_3 = Conv2DTranspose(n_chn, (3, 3), strides=1, padding='same', activation='sigmoid')  # output in [0, 1]
+
+    # decoder
     x = decoder_hidden(z)
     x = decoder_expand(x)
     x = decoder_reshape(x)
-    x = decoder_conv_1(x)
-    x = decoder_upsample_1(x)
-    x = decoder_conv_2(x)
-    x = decoder_upsample_2(x)
-    decoded_output = decoder_conv_3(x)
+    x = decoder_deconv_1(x)
+    x = decoder_bn_1(x)
+    x = decoder_actv_1(x)
+    x = decoder_deconv_2(x)
+    x = decoder_bn_2(x)
+    x = decoder_actv_2(x)
+    decoded_output = decoder_deconv_3(x)
 
     # VAE model
     vae = Model(vae_input, decoded_output)
@@ -151,11 +160,13 @@ def build_vae(n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3):
     x = decoder_hidden(gen_input)
     x = decoder_expand(x)
     x = decoder_reshape(x)
-    x = decoder_conv_1(x)
-    x = decoder_upsample_1(x)
-    x = decoder_conv_2(x)
-    x = decoder_upsample_2(x)
-    gen_output = decoder_conv_3(x)
+    x = decoder_deconv_1(x)
+    x = decoder_bn_1(x)
+    x = decoder_actv_1(x)
+    x = decoder_deconv_2(x)
+    x = decoder_bn_2(x)
+    x = decoder_actv_2(x)
+    gen_output = decoder_deconv_3(x)
     generator = Model(gen_input, gen_output)
 
     return vae, encoder, generator
@@ -171,9 +182,9 @@ if __name__ == '__main__':
     x_test, x_test_min, x_test_max = normalize_data(x_test, a=0, b=1, method='sample')
     x_train = np.expand_dims(x_train, axis=3)
     x_test = np.expand_dims(x_test, axis=3)
-    n_row, n_col = 28, 28
+    n_row, n_col, n_ch = x_train.shape[1:]
     n_filters = (128, 256)
-    nc = 10
+    n_clusters = 10
     nz = 8
     batch_size = 128
     n_epochs = 20
@@ -185,11 +196,13 @@ if __name__ == '__main__':
     output_path = './output/'
     if not path.exists(output_path):
         os.makedirs(output_path)
-    vae_model_fig_file = '%sMNIST_vae_model.pdf' % output_path
+    save_filename_prefix = '%sMNIST_vae_zdim%d' % (output_path, nz)
+
+    vae_model_fig_file = '%s_model.pdf' % save_filename_prefix
     plot_model(vae, to_file=vae_model_fig_file, show_shapes=True)
 
     # train VAE
-    vae_weights_file = '%sMNIST_vae_weights.hdf' % output_path
+    vae_weights_file = '%s_weights.hdf' % save_filename_prefix
     if path.isfile(vae_weights_file):  # load VAE model weights if weight file exists
         print('loading VAE model weights')
         vae.load_weights(vae_weights_file)
@@ -197,28 +210,51 @@ if __name__ == '__main__':
         print('training VAE model')
         vae.fit(x_train, x_train, batch_size=batch_size, epochs=n_epochs, verbose=1, validation_data=(x_test, x_test))
         vae.save_weights(vae_weights_file)
+
+    # encoding
     x_test_rec = vae.predict(x_test)
     x_test_enc = encoder.predict(x_test)
     x_train_enc = encoder.predict(x_train)
 
-    x_test_enc_clu = KMeans(n_clusters=nc).fit(x_test_enc)
-    y_test_kmeans = x_test_enc_clu.labels_
+    # clustering
+    x_test_enc_clu = KMeans(n_clusters=n_clusters).fit(x_test_enc)
+    y_test_clu = x_test_enc_clu.labels_
 
-    x_train_enc_clu = KMeans(n_clusters=nc).fit(x_train_enc)
-    y_train_kmeans = x_train_enc_clu.labels_
+    x_train_enc_clu = KMeans(n_clusters=n_clusters).fit(x_train_enc)
+    y_train_clu = x_train_enc_clu.labels_
 
-    acc_kmeans, w_means = cluster_acc(y_test_kmeans, y_test)
-    print('Accuracy of kmeans of latent variables results: %.4f' % acc_kmeans)
+    # clustering accuracy
+    acc_clu, w_clu = cluster_acc(y_test_clu, y_test)
+    print('accuracy of clustering of latent variables results: %.4f' % acc_clu)
+    print(w_clu.astype(int))
+
+    # generate new data and save the plot
+    n_image_rows, n_image_cols = 10, 10
+    plt.figure(figsize=(15, 15))
+    save_filename_image_gen = '%s_gen_epoch%d.pdf' % (save_filename_prefix, n_epochs)
+    for i in range(n_image_rows):
+        z_samples = np.random.multivariate_normal(np.zeros(nz), np.eye(nz), size=n_image_cols)
+        image_gen = generator.predict(z_samples)
+        for j in range(n_image_cols):
+            plt.subplot(n_image_rows, n_image_cols, i * n_image_cols + j + 1)
+            if n_ch == 1:
+                plt.imshow(image_gen[j, :, :, 0], cmap='gray')
+            elif n_ch == 3:
+                plt.imshow(image_gen[j])
+            plt.axis('off')
+    plt.savefig(save_filename_image_gen)
+    plt.clf()
+    plt.close('all')
 
     # visualize the encoded data
     n_data = 5000
     idx_data = np.random.permutation(x_train_enc.shape[0])[:n_data]
     print('visualization on training')
 
-    vae_encoder_output_fig_file = '%sMNIST_vae_encoder_train_tsne_output.pdf' % output_path
+    vae_encoder_output_fig_file = '%s_tSNE_encoder_output.pdf' % save_filename_prefix
     x_train_enc_tsne = TSNE(n_components=2, init='pca').fit_transform(x_train_enc[idx_data])
     fig = plt.figure(1, figsize=(10, 10))
-    plt.scatter(x_train_enc_tsne[:, 0], x_train_enc_tsne[:, 1], cmap=plt.cm.brg, c=y_train_kmeans[idx_data])
+    plt.scatter(x_train_enc_tsne[:, 0], x_train_enc_tsne[:, 1], cmap=plt.cm.brg, c=y_train_clu[idx_data])
     plt.colorbar()
     # plt.show()
     fig.savefig(vae_encoder_output_fig_file)

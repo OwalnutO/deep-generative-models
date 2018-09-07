@@ -26,14 +26,16 @@ from sklearn.manifold import TSNE
 from keras import losses
 from keras import initializers
 from keras.models import Model
-from keras.layers import Input, Dense, Flatten, Reshape, Lambda, Layer
-from keras.layers.convolutional import Conv1D, Conv2D, Conv2DTranspose
-from keras.layers.convolutional import MaxPooling1D, MaxPooling2D, UpSampling1D, UpSampling2D
+from keras.layers import Input, Dense, Flatten, Reshape, Activation, Lambda, Layer
+from keras.layers.convolutional import Conv2D, Conv2DTranspose
+from keras.layers.convolutional import MaxPooling2D, UpSampling2D
+from keras.layers.normalization import BatchNormalization
+from keras.layers.advanced_activations import LeakyReLU
 from keras.utils import plot_model
 from keras.optimizers import *
 from keras import backend as K
 K.set_image_data_format('channels_last')
-from scipy.optimize import linear_sum_assignment
+from sklearn.utils.linear_assignment_ import linear_assignment
 
 
 
@@ -90,7 +92,6 @@ def denormalize_data(data, min_data, max_data, a=0, b=1):
 
 
 def cluster_acc(y_true, y_pred):
-    from sklearn.utils.linear_assignment_ import linear_assignment
     assert y_pred.size == y_true.size
     D = max(y_pred.max(), y_true.max()) + 1
     w = np.zeros((D, D))
@@ -126,8 +127,8 @@ class KLDivergenceLossLayer(Layer):
         z = z_mean + K.exp(0.5 * z_log_var) * epsilon
 
         # clip the values
-        self.pi = K.clip(self.pi, K.epsilon(), 2)
-        self.sigma = K.clip(self.sigma, K.epsilon(), 100)
+        # self.pi = K.clip(self.pi, K.epsilon(), 1)
+        # self.sigma = K.clip(self.sigma, K.epsilon(), 100)
 
         z_nc = K.permute_dimensions(K.repeat(z, self.n_centroids), [0, 2, 1])
         z_mean_nc = K.permute_dimensions(K.repeat(z_mean, self.n_centroids), [0, 2, 1])
@@ -154,49 +155,53 @@ class KLDivergenceLossLayer(Layer):
 
 
 # build VaDE network
-def build_vade(n_centroids, n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3):
+def build_vade(n_centroids, n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3, leaky_relu_alpha=0.2):
     opt = Adam(lr=lr)
     # encoder
     vade_input = Input(shape=(n_row, n_col, n_chn))
-    x = Conv2D(n_filters[0], (3, 3), padding='same', activation='relu')(vade_input)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-    x = Conv2D(n_filters[1], (3, 3), padding='same', activation='relu')(x)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-    shapeBeforeFlatten = x._keras_shape[1:]
+    x = Conv2D(n_filters[0], (3, 3), strides=2, padding='same')(vade_input)
+    # x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(alpha=leaky_relu_alpha)(x)
+    x = Conv2D(n_filters[1], (3, 3), strides=2, padding='same')(x)
+    # x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(alpha=leaky_relu_alpha)(x)
+    shape_before_flatten = x._keras_shape[1:]
     x = Flatten()(x)
     x = Dense(1024, activation='relu')(x)
     z_mean = Dense(output_size, activation='linear', name='z_mean')(x)  # mean of z
     z_log_var = Dense(output_size, activation='linear', name='z_log_var')(x)  # log variance of z
     encoder = Model(vade_input, z_mean)
-    # z = Lambda(sample_z, output_shape=(output_size,), name='z')([z_mean, z_log_var])  # reparametrization
     z, z_mean, z_log_var, q_c_given_x = KLDivergenceLossLayer(n_centroids=n_centroids, name='kl_divergence_loss')([z_mean, z_log_var])  # reparametrization and custom layer to add the negative ELBO loss
 
     # classifier
     classifier = Model(vade_input, q_c_given_x)
 
-    # decoder
+    # define decoder/generator layers
     decoder_hidden = Dense(1024, activation='relu')
-    decoder_expand = Dense(np.prod(shapeBeforeFlatten), activation='relu')
-    decoder_reshape = Reshape(shapeBeforeFlatten)
-    decoder_conv_1 = Conv2D(n_filters[1], (3, 3), padding='same', activation='relu')
-    decoder_upsample_1 = UpSampling2D((2, 2))
-    decoder_conv_2 = Conv2D(n_filters[0], (3, 3), padding='same', activation='relu')
-    decoder_upsample_2 = UpSampling2D((2, 2))
-    decoder_conv_3 = Conv2D(n_chn, (3, 3), padding='same', activation='sigmoid')  # output in [0, 1]
+    decoder_expand = Dense(np.prod(shape_before_flatten), activation='relu')
+    decoder_reshape = Reshape(shape_before_flatten)
+    decoder_deconv_1 = Conv2DTranspose(n_filters[1], (3, 3), strides=2, padding='same')
+    decoder_bn_1 = BatchNormalization(axis=-1)
+    decoder_actv_1 = Activation('relu')
+    decoder_deconv_2 = Conv2DTranspose(n_filters[0], (3, 3), strides=2, padding='same')
+    decoder_bn_2 = BatchNormalization(axis=-1)
+    decoder_actv_2 = Activation('relu')
+    decoder_deconv_3 = Conv2DTranspose(n_chn, (3, 3), strides=1, padding='same', activation='sigmoid')  # output in [0, 1]
+
+    # decoder
     x = decoder_hidden(z)
     x = decoder_expand(x)
     x = decoder_reshape(x)
-    x = decoder_conv_1(x)
-    x = decoder_upsample_1(x)
-    x = decoder_conv_2(x)
-    x = decoder_upsample_2(x)
-    decoded_output = decoder_conv_3(x)
+    x = decoder_deconv_1(x)
+    x = decoder_bn_1(x)
+    x = decoder_actv_1(x)
+    x = decoder_deconv_2(x)
+    x = decoder_bn_2(x)
+    x = decoder_actv_2(x)
+    decoded_output = decoder_deconv_3(x)
 
     # VaDE model
     vade = Model(vade_input, decoded_output)
-    # VaDE loss that considers the KL loss (old method, without using the custom layer)
-    # vade_loss_val = vade_loss(n_centroids, vade_input, decoded_output, z, z_mean, z_log_var)
-    # vade.add_loss(vade_loss_val)
     vade.compile(optimizer=opt, loss=neg_log_ll(n_row, n_col, n_chn, alpha=alpha))
     vade.summary()
 
@@ -205,11 +210,13 @@ def build_vade(n_centroids, n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3):
     x = decoder_hidden(gen_input)
     x = decoder_expand(x)
     x = decoder_reshape(x)
-    x = decoder_conv_1(x)
-    x = decoder_upsample_1(x)
-    x = decoder_conv_2(x)
-    x = decoder_upsample_2(x)
-    gen_output = decoder_conv_3(x)
+    x = decoder_deconv_1(x)
+    x = decoder_bn_1(x)
+    x = decoder_actv_1(x)
+    x = decoder_deconv_2(x)
+    x = decoder_bn_2(x)
+    x = decoder_actv_2(x)
+    gen_output = decoder_deconv_3(x)
     generator = Model(gen_input, gen_output)
 
     return vade, encoder, classifier, generator
@@ -225,80 +232,110 @@ if __name__ == '__main__':
     x_test, x_test_min, x_test_max = normalize_data(x_test, a=0, b=1, method='sample')
     x_train = np.expand_dims(x_train, axis=3)
     x_test = np.expand_dims(x_test, axis=3)
-    n_row, n_col = 28, 28
+    n_row, n_col, n_ch = x_train.shape[1:]
     n_filters = (128, 256)
-    nc = 10
+    n_class = 10
     nz = 8
     batch_size = 128
     n_epochs = 20
-    vade, encoder, classifier, generator = build_vade(nc, n_row, n_col, 1, nz, alpha=4, lr=1e-3)
-
-    # pretrain the underlying AutoEncoder model
     is_pretrain = True
     n_pretrain_epochs = 5
-    if is_pretrain:
-        print('pretrain the underlying AutoEncoder model')
-        encoder_input = Input(shape=(n_row, n_col, 1))
-        encoder_output = encoder(encoder_input)
-        decoder_output = generator(encoder_output)
-        ae = Model(encoder_input, decoder_output)
-        ae.compile(optimizer='adam', loss='binary_crossentropy')
-        ae.fit(x_train, x_train, batch_size=batch_size, epochs=n_pretrain_epochs, verbose=1, validation_data=(x_test, x_test))
-        x_train_enc_pretrain = encoder.predict(x_train)
-        # estimate the GMM parameters from the encoded latent variables of the data
-        gmm_model = mixture.GaussianMixture(n_components=nc, covariance_type='diag')
-        gmm_model.fit(x_train_enc_pretrain)
-        # initialize the GMM parameters
-        vade.get_layer('kl_divergence_loss').set_weights([gmm_model.weights_, gmm_model.means_.T, gmm_model.covariances_.T])
 
-    # model visualization
+    vade, encoder, classifier, generator = build_vade(n_class, n_row, n_col, n_ch, nz, alpha=4, lr=1e-3)
+
+    # output folder
     output_path = './output/'
     if not path.exists(output_path):
         os.makedirs(output_path)
-    vade_model_fig_file = '%sMNIST_vade_model.pdf' % output_path
+    save_filename_prefix = '%sMNIST_vade_zdim%d_class%d' % (output_path, nz, n_class)
+
+    # model visualization
+    vade_model_fig_file = '%s_model.pdf' % save_filename_prefix
     plot_model(vade, to_file=vade_model_fig_file, show_shapes=True)
 
     # train VaDE
-    vadeWeightFile = '%sMNIST_vade_weights.hdf' % output_path
-    if path.isfile(vadeWeightFile):  # load VaDE model weights if weight file exists
+    vade_weight_file = '%s_weights.hdf' % save_filename_prefix
+    if path.isfile(vade_weight_file):  # load VaDE model weights if weight file exists
         print('loading VaDE model weights')
-        vade.load_weights(vadeWeightFile)
+        vade.load_weights(vade_weight_file)
     else:  # train VaDE and save weights
         print('training VaDE model')
+        # pretrain the underlying AutoEncoder model
+        if is_pretrain:
+            print('pretrain the underlying AutoEncoder model')
+            encoder_input = Input(shape=(n_row, n_col, n_ch))
+            encoder_output = encoder(encoder_input)
+            decoder_output = generator(encoder_output)
+            ae = Model(encoder_input, decoder_output)
+            ae.compile(optimizer='adam', loss='binary_crossentropy')
+            ae.fit(x_train, x_train, batch_size=batch_size, epochs=n_pretrain_epochs, verbose=1,
+                   validation_data=(x_test, x_test))
+            x_train_enc_pretrain = encoder.predict(x_train)
+            # estimate the GMM parameters from the encoded latent variables of the data
+            gmm_model = mixture.GaussianMixture(n_components=n_class, covariance_type='diag')
+            gmm_model.fit(x_train_enc_pretrain)
+            # initialize the GMM parameters
+            vade.get_layer('kl_divergence_loss').set_weights([gmm_model.weights_, gmm_model.means_.T, gmm_model.covariances_.T])
         vade.fit(x_train, x_train, batch_size=batch_size, epochs=n_epochs, verbose=1, validation_data=(x_test, x_test))
-        vade.save_weights(vadeWeightFile)
+        vade.save_weights(vade_weight_file)
+
+    # encoding and classification
     x_test_rec = vade.predict(x_test)
     x_test_enc = encoder.predict(x_test)
-    y_test_classifier = classifier.predict(x_test)
-    y_test_classifier_argmax = np.argmax(y_test_classifier, axis=1)
+    y_test_class_softmax = classifier.predict(x_test)
+    y_test_class_argmax = np.argmax(y_test_class_softmax, axis=1)
 
     x_train_enc = encoder.predict(x_train)
-    y_train_classifier = classifier.predict(x_train)
-    y_train_classifier_argmax = np.argmax(y_train_classifier, axis=1)
+    y_train_class_softmax = classifier.predict(x_train)
+    y_train_class_argmax = np.argmax(y_train_class_softmax, axis=1)
 
-    x_test_enc_clu = KMeans(n_clusters=nc).fit(x_test_enc)
-    y_test_kmeans = x_test_enc_clu.labels_
+    # clustering
+    x_test_enc_clu = KMeans(n_clusters=n_class).fit(x_test_enc)
+    y_test_clu = x_test_enc_clu.labels_
 
-    x_train_enc_clu = KMeans(n_clusters=nc).fit(x_train_enc)
-    y_train_kmeans = x_train_enc_clu.labels_
+    x_train_enc_clu = KMeans(n_clusters=n_class).fit(x_train_enc)
+    y_train_clu = x_train_enc_clu.labels_
 
-    acc_classifier_argmax, w_classifier_argmax = cluster_acc(y_test_classifier_argmax, y_test)
-    acc_kmeans, w_means = cluster_acc(y_test_kmeans, y_test)
-    print('Accuracy of argmax of classifier results: %.4f' % acc_classifier_argmax)
-    print('Accuracy of kmeans of latent variables results: %.4f' % acc_kmeans)
+    # classification and clustering accuracy
+    acc_class_argmax, w_class_argmax = cluster_acc(y_test_class_argmax, y_test)
+    acc_clu, w_clu = cluster_acc(y_test_clu, y_test)
+    print('accuracy of argmax of classifier results: %.4f' % acc_class_argmax)
+    print(w_class_argmax.astype(int))
+    print('accuracy of clustering of latent variables results: %.4f' % acc_clu)
+    print(w_clu.astype(int))
+
+    # generate new data and save the plot
+    gmm_weights, gmm_means, gmm_covariances = vade.get_layer('kl_divergence_loss').get_weights()
+    n_image_cols = 10
+    plt.figure(figsize=(15, 15))
+    save_filename_image_gen = '%s_gen_epoch%d.pdf' % (save_filename_prefix, n_epochs)
+    for i in range(n_class):
+        z_samples = np.random.multivariate_normal(gmm_means[:, i], np.diag(gmm_covariances[:, i]), size=n_image_cols)
+        image_gen = generator.predict(z_samples)
+        for j in range(n_image_cols):
+            plt.subplot(n_class, n_image_cols, i * n_image_cols + j + 1)
+            if n_ch == 1:
+                plt.imshow(image_gen[j, :, :, 0], cmap='gray')
+            elif n_ch == 3:
+                plt.imshow(image_gen[j])
+            plt.axis('off')
+    plt.savefig(save_filename_image_gen)
+    plt.clf()
+    plt.close('all')
 
     # visualize the encoded data
     n_data = 5000
     idx_data = np.random.permutation(x_train_enc.shape[0])[:n_data]
     print('visualization on training')
 
-    vade_encoder_output_fig_file = '%sMNIST_vade_encoder_train_tsne_output.pdf' % output_path
+    vade_encoder_output_fig_file = '%s_tSNE_encoder_output.pdf' % save_filename_prefix
     x_train_enc_tsne = TSNE(n_components=2, init='pca').fit_transform(x_train_enc[idx_data])
-    fig = plt.figure(1, figsize=(10, 10))
-    plt.scatter(x_train_enc_tsne[:, 0], x_train_enc_tsne[:, 1], cmap=plt.cm.brg, c=y_train_classifier_argmax[idx_data])
+    fig = plt.figure(figsize=(10, 10))
+    plt.scatter(x_train_enc_tsne[:, 0], x_train_enc_tsne[:, 1], cmap=plt.cm.brg, c=y_train_clu[idx_data])
     plt.colorbar()
     # plt.show()
     fig.savefig(vade_encoder_output_fig_file)
     fig.clf()
+
 
     pass

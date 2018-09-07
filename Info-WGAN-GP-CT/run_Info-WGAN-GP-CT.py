@@ -46,6 +46,7 @@ from keras.utils import plot_model  # for model visualization, need to install G
 from keras.optimizers import *
 from keras import backend as K
 K.set_image_data_format('channels_last')
+from sklearn.utils.linear_assignment_ import linear_assignment
 
 
 
@@ -122,7 +123,6 @@ def denormalize_data(data, min_data, max_data, a=0, b=1):
 
 
 def cluster_acc(y_true, y_pred):
-    from sklearn.utils.linear_assignment_ import linear_assignment
     assert y_pred.size == y_true.size
     D = max(y_pred.max(), y_true.max()) + 1
     w = np.zeros((D, D))
@@ -133,7 +133,7 @@ def cluster_acc(y_true, y_pred):
 
 
 # plot loss function
-def plot_loss(losses, save=False, saveFileName=None):
+def plot_loss(losses, save=False, save_filename=None):
     plt.figure(figsize=(10, 10))
     g_loss = np.array(losses['g'])
     d_loss = np.array(losses['d'])
@@ -149,8 +149,8 @@ def plot_loss(losses, save=False, saveFileName=None):
     plt.plot(info_penalty_unsupervised, label='info_unsupervised')
     plt.legend()
     if save:
-        if saveFileName is not None:
-            plt.savefig(saveFileName)
+        if save_filename is not None:
+            plt.savefig(save_filename)
     else:
         plt.show()
     plt.clf()
@@ -167,7 +167,7 @@ def get_noise(dim_noise, dim_cat, dim_cont, batch_size=32):
 
 
 # plot generated images
-def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, saveFileName=None, method='cat', label_val=0, cont_val=0, **kwargs):
+def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, save_filename=None, method='cat', label_val=0, cont_val=0, **kwargs):
     dim_noise = generator.layers[0].input_shape[1]
     dim_cat = generator.layers[1].input_shape[1]
     dim_cont = generator.layers[2].input_shape[1]
@@ -211,8 +211,8 @@ def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, saveFileNa
     else:
         raise NotImplementedError
     if save:
-        if saveFileName is not None:
-            plt.savefig(saveFileName)
+        if save_filename is not None:
+            plt.savefig(save_filename)
     else:
         plt.tight_layout()
         plt.show()
@@ -450,14 +450,14 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
             if save_mode is 'multi_channel':
                 for ic in range(n_ch):
                     save_filename_image_gen = '%s_cat_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, ie + 1)
-                    plot_gen(generator, (dim_cat, 10), (15, 15), ic, True, save_filename_image_gen, method='cat', cmap='gray')
+                    plot_gen(generator, (dim_cat, 10), (15, 15), ic, True, save_filename_image_gen, method='cat', cont_val=1, cmap='gray')
                     save_filename_image_gen = '%s_cont_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, ie + 1)
-                    plot_gen(generator, (10, 10), (15, 15), ic, True, save_filename_image_gen, method='cont', cmap='gray')
+                    plot_gen(generator, (10, 10), (15, 15), ic, True, save_filename_image_gen, method='cont', label_val=1, cmap='gray')
             elif save_mode is 'color':
                 save_filename_image_gen = '%s_cat_gen_epoch%d.pdf' % (save_filename_prefix, ie + 1)
-                plot_gen(generator, (dim_cat, 10), (15, 15), 'color', True, save_filename_image_gen, method='cat')
+                plot_gen(generator, (dim_cat, 10), (15, 15), 'color', True, save_filename_image_gen, method='cat', cont_val=1)
                 save_filename_image_gen = '%s_cont_gen_epoch%d.pdf' % (save_filename_prefix, ie + 1)
-                plot_gen(generator, (10, 10), (15, 15), 'color', True, save_filename_image_gen, method='cont')
+                plot_gen(generator, (10, 10), (15, 15), 'color', True, save_filename_image_gen, method='cont', label_val=1)
 
     # plot loss
     save_filename_loss = '%s_loss_epoch%d.pdf' % (save_filename_prefix, n_epochs)
@@ -482,7 +482,7 @@ if __name__ == '__main__':
     batch_size = 128
     n_epochs = 100
     n_save_every = 10
-    g_lr = 2e-4
+    g_lr = 1e-3
     g_beta1 = 0.5
     g_beta2 = 0.9
     d_lr = 2e-4
@@ -496,6 +496,7 @@ if __name__ == '__main__':
     output_path = './output/'
     if not path.exists(output_path):
         os.makedirs(output_path)
+    save_mode = 'multi_channel'
     save_filename_prefix = '%sMNIST_infowgangpct_noise%d_cat%d' % (output_path, dim_noise, n_class)
 
     generator = build_generator(n_class, n_cont, n_row, n_col, n_out_ch=n_ch, n_first_conv_ch=256, dim_noise=dim_noise)
@@ -534,7 +535,7 @@ if __name__ == '__main__':
                            n_epochs=n_epochs,
                            train_dgratio=5,
                            save_every=n_save_every,
-                           save_mode='multi_channel',
+                           save_mode=save_mode,
                            save_filename_prefix=save_filename_prefix)
         generator.save_weights(generator_weights_file)
         discriminator.save_weights(discriminator_weights_file)
@@ -546,6 +547,19 @@ if __name__ == '__main__':
     y_test_pred = np.argmax(y_test_softmax, axis=1)
     acc_pred, w_cluster = cluster_acc(y_test, y_test_pred)
     print('Classifier accuracy: %.4f' % acc_pred)
-    print(w_cluster)
+    print(w_cluster.astype(int))
+
+    # generate new data and save the plot
+    if save_mode is 'multi_channel':
+        for ic in range(n_ch):
+            save_filename_image_gen = '%s_cat_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, n_epochs)
+            plot_gen(generator, (n_class, 10), (15, 15), ic, True, save_filename_image_gen, method='cat', cont_val=1, cmap='gray')
+            save_filename_image_gen = '%s_cont_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, n_epochs)
+            plot_gen(generator, (10, 10), (15, 15), ic, True, save_filename_image_gen, method='cont', label_val=1, cmap='gray')
+    elif save_mode is 'color':
+        save_filename_image_gen = '%s_cat_gen_epoch%d.pdf' % (save_filename_prefix, n_epochs)
+        plot_gen(generator, (n_class, 10), (15, 15), 'color', True, save_filename_image_gen, method='cat', cont_val=1)
+        save_filename_image_gen = '%s_cont_gen_epoch%d.pdf' % (save_filename_prefix, n_epochs)
+        plot_gen(generator, (10, 10), (15, 15), 'color', True, save_filename_image_gen, method='cont', label_val=1)
 
     pass

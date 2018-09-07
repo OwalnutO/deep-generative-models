@@ -33,6 +33,7 @@ from keras.utils import plot_model  # for model visualization, need to install G
 from keras.optimizers import *
 from keras import backend as K
 K.set_image_data_format('channels_last')
+from sklearn.utils.linear_assignment_ import linear_assignment
 
 
 
@@ -77,7 +78,6 @@ def denormalize_data(data, min_data, max_data, a=0, b=1):
 
 
 def cluster_acc(y_true, y_pred):
-    from sklearn.utils.linear_assignment_ import linear_assignment
     assert y_pred.size == y_true.size
     D = max(y_pred.max(), y_true.max()) + 1
     w = np.zeros((D, D))
@@ -88,7 +88,7 @@ def cluster_acc(y_true, y_pred):
 
 
 # plot loss function
-def plot_loss(losses, save=False, saveFileName=None):
+def plot_loss(losses, save=False, save_filename=None):
     plt.figure(figsize=(10, 10))
     g_loss = np.array(losses['g'])
     d_loss = np.array(losses['d'])
@@ -98,8 +98,8 @@ def plot_loss(losses, save=False, saveFileName=None):
     plt.plot(d_loss[:, 1], label='D mse')
     plt.legend()
     if save:
-        if saveFileName is not None:
-            plt.savefig(saveFileName)
+        if save_filename is not None:
+            plt.savefig(save_filename)
     else:
         plt.show()
     plt.clf()
@@ -115,7 +115,7 @@ def get_noise(dim_noise, dim_cat, batch_size=32):
 
 
 # plot generated images
-def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, saveFileName=None, **kwargs):
+def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, save_filename=None, **kwargs):
     dim_noise = generator.layers[0].input_shape[1]
     dim_cat = generator.layers[1].input_shape[1]
     n_image_col = dim[1]
@@ -127,11 +127,14 @@ def plot_gen(generator, dim, figsize=(10, 10), channel=0, save=False, saveFileNa
         image_gen = generator.predict([noise, label])
         for j in range(n_image_col):
             plt.subplot(dim_cat, n_image_col, i*n_image_col+j+1)
-            plt.imshow(image_gen[j, :, :, channel],  **kwargs)
+            if isinstance(channel, int):
+                plt.imshow(image_gen[j, :, :, channel], **kwargs)
+            elif channel is 'color':
+                plt.imshow(image_gen[j], **kwargs)
             plt.axis('off')
     if save:
-        if saveFileName is not None:
-            plt.savefig(saveFileName)
+        if save_filename is not None:
+            plt.savefig(save_filename)
     else:
         plt.tight_layout()
         plt.show()
@@ -211,7 +214,12 @@ def build_infogan(generator, discriminator, classifier, lr=1e-4, beta_1=0.5, bet
     return gan
 
 
-def train_for_epochs(image_set, generator, discriminator, gan, losses, batch_size=32, n_epochs=100, save_every=10, save_filename_prefix=None):
+def train_for_epochs(image_set, generator, discriminator, gan, losses,
+                     batch_size=32,
+                     n_epochs=100,
+                     save_every=10,
+                     save_mode='multi_channel',
+                     save_filename_prefix=None):
     label_smooth = 0.1  # label smoothing factor
     n_train = image_set.shape[0]
     dim_noise = generator.layers[0].input_shape[1]
@@ -253,10 +261,14 @@ def train_for_epochs(image_set, generator, discriminator, gan, losses, batch_siz
 
         # plot interim results
         if ((ie + 1) % save_every == 0) or (ie == n_epochs - 1):
-            # display generated images channel by channel
-            for ic in range(n_ch):
-                save_filename_image_gen = '%s_cat_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, ie + 1)
-                plot_gen(generator, (dim_cat, 10), (15, 15), ic, True, save_filename_image_gen, cmap='gray')
+            if save_mode is 'multi_channel':
+                # display generated images channel by channel
+                for ic in range(n_ch):
+                    save_filename_image_gen = '%s_cat_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, ie + 1)
+                    plot_gen(generator, (dim_cat, 10), (15, 15), ic, True, save_filename_image_gen, cmap='gray')
+            elif save_mode is 'color':
+                save_filename_image_gen = '%s_cat_gen_epoch%d.pdf' % (save_filename_prefix, ie + 1)
+                plot_gen(generator, (dim_cat, 10), (15, 15), 'color', True, save_filename_image_gen)
 
     # plot loss
     save_filename_loss = '%s_loss_epoch%d.pdf' % (save_filename_prefix, n_epochs)
@@ -294,6 +306,7 @@ if __name__ == '__main__':
     output_path = './output/'
     if not path.exists(output_path):
         os.makedirs(output_path)
+    save_mode = 'multi_channel'
     save_filename_prefix = '%sMNIST_infogan_noise%d_cat%d' % (output_path, dim_noise, n_class)
 
     # generator
@@ -318,6 +331,7 @@ if __name__ == '__main__':
                          batch_size=batch_size,
                          n_epochs=n_epochs,
                          save_every=n_save_every,
+                         save_mode=save_mode,
                          save_filename_prefix=save_filename_prefix)
         infogan.save_weights(gan_weights_file)
 
@@ -326,6 +340,16 @@ if __name__ == '__main__':
     y_test_pred = np.argmax(y_test_softmax, axis=1)
     acc_pred, w_cluster = cluster_acc(y_test, y_test_pred)
     print('Classifier accuracy: %.4f' % acc_pred)
-    print(w_cluster)
+    print(w_cluster.astype(int))
+
+    # generate new data and save the plot
+    if save_mode is 'multi_channel':
+        # display generated images channel by channel
+        for ic in range(n_ch):
+            save_filename_image_gen = '%s_cat_gen_ch%d_epoch%d.pdf' % (save_filename_prefix, ic, n_epochs)
+            plot_gen(generator, (n_class, 10), (15, 15), ic, True, save_filename_image_gen, cmap='gray')
+    elif save_mode is 'color':
+        save_filename_image_gen = '%s_cat_gen_epoch%d.pdf' % (save_filename_prefix, n_epochs)
+        plot_gen(generator, (n_class, 10), (15, 15), 'color', True, save_filename_image_gen)
 
     pass
