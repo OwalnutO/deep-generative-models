@@ -214,12 +214,12 @@ def build_infogan(generator, discriminator, classifier, lr=1e-4, beta_1=0.5, bet
     return gan
 
 
-def train_for_epochs(image_set, generator, discriminator, gan, losses,
-                     batch_size=32,
-                     n_epochs=100,
-                     save_every=10,
-                     save_mode='multi_channel',
-                     save_filename_prefix=None):
+def train_infogan(image_set, generator, discriminator, gan, losses,
+                  batch_size=32,
+                  n_epochs=100,
+                  save_every=10,
+                  save_mode='multi_channel',
+                  save_filename_prefix=None):
     label_smooth = 0.1  # label smoothing factor
     n_train = image_set.shape[0]
     dim_noise = generator.layers[0].input_shape[1]
@@ -327,12 +327,12 @@ if __name__ == '__main__':
     else:
         # train InfoGAN
         print('training InfoGAN model')
-        train_for_epochs(x_train, generator, discriminator, infogan, losses,
-                         batch_size=batch_size,
-                         n_epochs=n_epochs,
-                         save_every=n_save_every,
-                         save_mode=save_mode,
-                         save_filename_prefix=save_filename_prefix)
+        train_infogan(x_train, generator, discriminator, infogan, losses,
+                      batch_size=batch_size,
+                      n_epochs=n_epochs,
+                      save_every=n_save_every,
+                      save_mode=save_mode,
+                      save_filename_prefix=save_filename_prefix)
         infogan.save_weights(gan_weights_file)
 
     # accuracy test

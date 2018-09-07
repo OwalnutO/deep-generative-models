@@ -341,9 +341,9 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
     for d_layer in discriminator.layers[1:]:
         if 'dropout' in d_layer.name:  # do not use the backend wrapper K.dropout as it always sets up a fixed random seed
             disc_out_val_real_1 = K.tf.nn.dropout(disc_out_val_real_1 * 1.,
-                                                keep_prob=1-d_layer.get_config()['rate'],
-                                                noise_shape=d_layer.get_config()['noise_shape'],
-                                                seed=None)
+                                                  keep_prob=1-d_layer.get_config()['rate'],
+                                                  noise_shape=d_layer.get_config()['noise_shape'],
+                                                  seed=None)
         else:
             disc_out_val_real_1 = d_layer(disc_out_val_real_1)
     # discriminator output for the 2nd virtual data point close to the read data point
@@ -351,9 +351,9 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
     for d_layer in discriminator.layers[1:]:
         if 'dropout' in d_layer.name:  # do not use the backend wrapper K.dropout as it always sets up a fixed random seed
             disc_out_val_real_2 = K.tf.nn.dropout(disc_out_val_real_2 * 1.,
-                                                keep_prob=1-d_layer.get_config()['rate'],
-                                                noise_shape=d_layer.get_config()['noise_shape'],
-                                                seed=None)
+                                                  keep_prob=1-d_layer.get_config()['rate'],
+                                                  noise_shape=d_layer.get_config()['noise_shape'],
+                                                  seed=None)
         else:
             disc_out_val_real_2 = d_layer(disc_out_val_real_2)
     consistency_term = K.square(disc_out_val_real_1 - disc_out_val_real_2)
