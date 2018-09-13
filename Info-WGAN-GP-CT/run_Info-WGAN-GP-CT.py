@@ -290,6 +290,7 @@ def build_disc_aux(n_class, n_cont, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=25
 
 
 def train_infowgangpct(image_set, label_set, generator, generator_opt, discriminator, discriminator_opt, classifier, feature_extractor, losses,
+                       label_rate=1,
                        label_mode='cat',
                        lambda_gp=10,
                        lambda_ct=2,
@@ -409,7 +410,12 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
             # real batch
             idx_real_batch = idx_randperm[range(ib * batch_size, ib * batch_size + batch_size)]
             image_real_batch = image_set[idx_real_batch]
-            label_real_batch = label_set[idx_real_batch]
+            # semi-supervision
+            toss = np.random.binomial(1, label_rate)
+            if toss > 0:
+                label_real_batch = label_set[idx_real_batch]
+            else:
+                _, label_real_batch, _ = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
             # fake batch
             noise_disc, label_disc, cont_disc = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
             # train the discriminator model
@@ -428,8 +434,12 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
             # train generator and classifier
             if ((ib + 1) % train_dgratio == 0):
                 noise_gen, label_gen, cont_gen = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
-                idx_gen_batch = np.random.randint(0, n_train, size=(batch_size,))
-                label_gen_batch = label_set[idx_gen_batch]
+                # semi-supervision
+                if toss > 0:
+                    idx_gen_batch = np.random.randint(0, n_train, size=(batch_size,))
+                    label_gen_batch = label_set[idx_gen_batch]
+                else:
+                    label_gen_batch = label_gen
                 d_loss_fake_train_val,\
                 info_penalty_sup_fake_train_val,\
                 info_penalty_unsup_train_val = g_train([label_gen_batch, noise_gen, label_gen, cont_gen])
@@ -491,6 +501,7 @@ if __name__ == '__main__':
     dim_noise = 50
     n_class = 10
     n_cont = 2
+    label_rate = 0.1
 
     # output folder
     output_path = './output/'
@@ -528,6 +539,7 @@ if __name__ == '__main__':
         print('training InfoWGAN-GP model')
         y_train = np_utils.to_categorical(y_train, num_classes=n_class)
         train_infowgangpct(x_train, y_train, generator, generator_opt, discriminator, discriminator_opt, classifier, feature_extractor, losses,
+                           label_rate=label_rate,
                            lambda_gp=10,
                            lambda_ct=2,
                            lambda_info=1,

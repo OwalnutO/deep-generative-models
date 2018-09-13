@@ -225,7 +225,7 @@ def build_vade(n_centroids, n_row, n_col, n_chn, output_size, alpha=1, lr=1e-3, 
 
 if __name__ == '__main__':
 
-    # sanity check on MNIST
+    # sanity check on mnist
     from keras.datasets import mnist
     (x_train, y_train), (x_test, y_test) = mnist.load_data()
     x_train, x_train_min, x_train_max = normalize_data(x_train, a=0, b=1, method='sample')
