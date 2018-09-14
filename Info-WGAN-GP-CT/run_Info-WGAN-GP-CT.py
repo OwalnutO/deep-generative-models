@@ -295,7 +295,8 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
                        lambda_gp=10,
                        lambda_ct=2,
                        ct_ubound=0,
-                       lambda_info=1,
+                       lambda_info_sup=1,
+                       lambda_info_unsup=0.5,
                        batch_size=32,
                        n_epochs=100,
                        train_dgratio=5,
@@ -311,26 +312,20 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
     gen_in_cat = Input(shape=generator.layers[1].input_shape[1:])
     gen_in_cont = Input(shape=generator.layers[2].input_shape[1:])
     # generated fake data
-    if label_mode is 'cat':
-        gen_out_sup = generator([gen_in_noise, label_in, gen_in_cont])
-    elif label_mode is 'cont':
-        gen_out_sup = generator([gen_in_noise, gen_in_cat, label_in])
-    gen_out_unsup = generator([gen_in_noise, gen_in_cat, gen_in_cont])
+    gen_out = generator([gen_in_noise, gen_in_cat, gen_in_cont])
     # discriminator outputs
     disc_out_val_real = discriminator(real_in)
-    disc_out_val_fake = discriminator(gen_out_unsup)
+    disc_out_val_fake = discriminator(gen_out)
     # classifier outputs
-    class_out_softmax_sup_real = classifier(real_in)
-    class_out_softmax_sup_fake = classifier(gen_out_sup)
-    class_out_softmax_unsup_fake = classifier(gen_out_unsup)
+    class_out_softmax_real = classifier(real_in)
+    class_out_softmax_fake = classifier(gen_out)
     # feature extractor outputs
-    feature_out_mean_sup_real, feature_out_logstd_sup_real = feature_extractor(real_in)
-    feature_out_mean_sup_fake, feature_out_logstd_sup_fake = feature_extractor(gen_out_sup)
-    feature_out_mean_unsup_fake, feature_out_logstd_unsup_fake = feature_extractor(gen_out_unsup)
+    feature_out_mean_real, feature_out_logstd_real = feature_extractor(real_in)
+    feature_out_mean_fake, feature_out_logstd_fake = feature_extractor(gen_out)
 
     # gradient penalty
     eps_in = K.placeholder(shape=(None, 1, 1, 1))
-    interp = eps_in * real_in + (1 - eps_in) * gen_out_unsup
+    interp = eps_in * real_in + (1 - eps_in) * gen_out
     grad_interp = discriminator(interp)
     grad = K.gradients(grad_interp, [interp])[0]
     grad_norm = K.sqrt(K.sum(K.square(grad), axis=np.arange(1, len(grad.shape))))
@@ -362,37 +357,40 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
 
     # information maximization penalty
     if label_mode is 'cat':
-        info_penalty_sup_real = K.mean(-K.sum(K.log(class_out_softmax_sup_real + K.epsilon()) * label_in, axis=1))
-        info_penalty_sup_fake = K.mean(-K.sum(K.log(class_out_softmax_sup_fake + K.epsilon()) * label_in, axis=1))
-        unsup_norm = (gen_in_cont - feature_out_mean_unsup_fake) / (K.exp(feature_out_logstd_unsup_fake) + K.epsilon())
-        info_penalty_unsup = K.mean(K.sum(feature_out_logstd_unsup_fake + 0.5 * K.square(unsup_norm), axis=1))
+        info_penalty_real = K.mean(-K.sum(K.log(class_out_softmax_real + K.epsilon()) * label_in, axis=1))
     elif label_mode is 'cont':
-        sup_norm_real = (label_in - feature_out_mean_sup_real) / (K.exp(feature_out_logstd_sup_real) + K.epsilon())
-        info_penalty_sup_real = K.mean(K.sum(feature_out_logstd_sup_real + 0.5 * K.square(sup_norm_real), axis=1))
-        sup_norm_fake = (label_in - feature_out_mean_sup_fake) / (K.exp(feature_out_logstd_sup_fake) + K.epsilon())
-        info_penalty_sup_fake = K.mean(K.sum(feature_out_logstd_sup_fake + 0.5 * K.square(sup_norm_fake), axis=1))
-        info_penalty_unsup = K.mean(-K.sum(K.log(class_out_softmax_unsup_fake + K.epsilon()) * gen_in_cat, axis=1))
+        norm_real = (label_in - feature_out_mean_real) / (K.exp(feature_out_logstd_real) + K.epsilon())
+        info_penalty_real = K.mean(K.sum(feature_out_logstd_real + 0.5 * K.square(norm_real), axis=1))
+    info_penalty_fake_cat = K.mean(-K.sum(K.log(class_out_softmax_fake + K.epsilon()) * gen_in_cat, axis=1))
+    norm_fake_cont = (gen_in_cont - feature_out_mean_fake) / (K.exp(feature_out_logstd_fake) + K.epsilon())
+    info_penalty_fake_cont = K.mean(K.sum(feature_out_logstd_fake + 0.5 * K.square(norm_fake_cont), axis=1))
 
     # optimization
     d_loss_real = K.mean(disc_out_val_real)
     d_loss_fake = K.mean(disc_out_val_fake)
 
-    g_loss = -d_loss_fake\
-             + lambda_info * (info_penalty_sup_fake + info_penalty_unsup)
-    g_train_updates = generator_opt.get_updates(generator.trainable_weights, [], g_loss)
-    g_train = K.function([label_in, gen_in_noise, gen_in_cat, gen_in_cont],
-                         [d_loss_fake, info_penalty_sup_fake, info_penalty_unsup],
+    g_loss = -d_loss_fake
+    if label_mode is 'cat':
+        g_loss += (lambda_info_sup * info_penalty_fake_cat + lambda_info_unsup * info_penalty_fake_cont)
+    elif label_mode is 'cont':
+        g_loss += (lambda_info_sup * info_penalty_fake_cont + lambda_info_unsup * info_penalty_fake_cat)
+    g_trainable_weights = generator.trainable_weights
+    g_train_updates = generator_opt.get_updates(g_trainable_weights, [], g_loss)
+    g_train = K.function([gen_in_noise, gen_in_cat, gen_in_cont],
+                         [d_loss_fake, info_penalty_fake_cat, info_penalty_fake_cont],
                          g_train_updates)
 
     d_loss = d_loss_fake - d_loss_real\
              + lambda_gp * grad_penalty\
-             + lambda_ct * ct_penalty\
-             + lambda_info * (info_penalty_sup_real + info_penalty_unsup)
-    d_train_updates = discriminator_opt.get_updates(discriminator.trainable_weights
-                                                    + classifier.trainable_weights[-4:]
-                                                    + feature_extractor.trainable_weights[-6:], [], d_loss)
+             + lambda_ct * ct_penalty
+    if label_mode is 'cat':
+        d_loss += (lambda_info_sup * info_penalty_real + lambda_info_unsup * info_penalty_fake_cont)
+    elif label_mode is 'cont':
+        d_loss += (lambda_info_sup * info_penalty_real + lambda_info_unsup * info_penalty_fake_cat)
+    d_trainable_weights = discriminator.trainable_weights + classifier.trainable_weights[-4:] + feature_extractor.trainable_weights[-6:]
+    d_train_updates = discriminator_opt.get_updates(d_trainable_weights, [], d_loss)
     d_train = K.function([real_in, label_in, gen_in_noise, gen_in_cat, gen_in_cont, eps_in],
-                         [d_loss_real, d_loss_fake, grad_penalty, ct_penalty, info_penalty_sup_real, info_penalty_unsup],
+                         [d_loss_real, d_loss_fake, grad_penalty, ct_penalty, info_penalty_real, info_penalty_fake_cat, info_penalty_fake_cont],
                          d_train_updates)
 
     # training
@@ -424,28 +422,30 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
             d_loss_fake_train_val,\
             grad_penalty_train_val,\
             ct_penalty_train_val,\
-            info_penalty_sup_real_train_val,\
-            info_penalty_unsup_train_val = d_train([image_real_batch, label_real_batch, noise_disc, label_disc, cont_disc, eps])
+            info_penalty_real_train_val,\
+            info_penalty_fake_cat_train_val,\
+            info_penalty_fake_cont_train_val = d_train([image_real_batch, label_real_batch, noise_disc, label_disc, cont_disc, eps])
             losses['d'].append(d_loss_fake_train_val - d_loss_real_train_val)
             losses['grad'].append(grad_penalty_train_val)
             losses['ct'].append(ct_penalty_train_val)
-            losses['info_supervised'].append(info_penalty_sup_real_train_val)
-            losses['info_unsupervised'].append(info_penalty_unsup_train_val)
+            losses['info_supervised'].append(info_penalty_real_train_val)
+            if label_mode is 'cat':
+                losses['info_unsupervised'].append(info_penalty_fake_cont_train_val)
+            elif label_mode is 'cont':
+                losses['info_unsupervised'].append(info_penalty_fake_cat_train_val)
             # train generator and classifier
             if ((ib + 1) % train_dgratio == 0):
                 noise_gen, label_gen, cont_gen = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
-                # semi-supervision
-                if toss > 0:
-                    idx_gen_batch = np.random.randint(0, n_train, size=(batch_size,))
-                    label_gen_batch = label_set[idx_gen_batch]
-                else:
-                    label_gen_batch = label_gen
                 d_loss_fake_train_val,\
-                info_penalty_sup_fake_train_val,\
-                info_penalty_unsup_train_val = g_train([label_gen_batch, noise_gen, label_gen, cont_gen])
+                info_penalty_fake_cat_train_val,\
+                info_penalty_fake_cont_train_val = g_train([noise_gen, label_gen, cont_gen])
                 losses['g'].extend([-d_loss_fake_train_val] * train_dgratio)
-                losses['info_supervised'][-1] += info_penalty_sup_fake_train_val
-                losses['info_unsupervised'][-1] += info_penalty_unsup_train_val
+                if label_mode is 'cat':
+                    losses['info_supervised'][-1] += info_penalty_fake_cat_train_val
+                    losses['info_unsupervised'][-1] += info_penalty_fake_cont_train_val
+                elif label_mode is 'cont':
+                    losses['info_supervised'][-1] += info_penalty_fake_cont_train_val
+                    losses['info_unsupervised'][-1] += info_penalty_fake_cat_train_val
                 # update progress bar
                 progbar.add(batch_size * train_dgratio, values=[('G loss', -d_loss_fake_train_val),
                                                                 ('D loss', d_loss_fake_train_val - d_loss_real_train_val),
@@ -498,10 +498,15 @@ if __name__ == '__main__':
     d_lr = 2e-4
     d_beta1 = 0.5
     d_beta2 = 0.9
+    lambda_gp = 10
+    lambda_ct = 2
+    train_dgratio = 5
     dim_noise = 50
     n_class = 10
     n_cont = 2
     label_rate = 0.1
+    lambda_info_sup = 2
+    lambda_info_unsup = 0.8
 
     # output folder
     output_path = './output/'
@@ -540,12 +545,13 @@ if __name__ == '__main__':
         y_train = np_utils.to_categorical(y_train, num_classes=n_class)
         train_infowgangpct(x_train, y_train, generator, generator_opt, discriminator, discriminator_opt, classifier, feature_extractor, losses,
                            label_rate=label_rate,
-                           lambda_gp=10,
-                           lambda_ct=2,
-                           lambda_info=1,
+                           lambda_gp=lambda_gp,
+                           lambda_ct=lambda_ct,
+                           lambda_info_sup=lambda_info_sup,
+                           lambda_info_unsup=lambda_info_unsup,
                            batch_size=batch_size,
                            n_epochs=n_epochs,
-                           train_dgratio=5,
+                           train_dgratio=train_dgratio,
                            save_every=n_save_every,
                            save_mode=save_mode,
                            save_filename_prefix=save_filename_prefix)
