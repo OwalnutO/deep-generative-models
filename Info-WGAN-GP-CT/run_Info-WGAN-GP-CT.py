@@ -242,7 +242,7 @@ def build_generator(n_class, n_cont, n_rows, n_cols, n_out_ch=1, n_first_conv_ch
     return generator
 
 
-def build_disc_aux(n_class, n_cont, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=256, leaky_relu_alpha=0.2, dropout_rate=0.4):
+def build_disc_aux(n_class, n_cont, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=256, leaky_relu_alpha=0.2, dropout_rate=0.25):
     d_in = Input(shape=(n_rows, n_cols, n_in_ch))
     x = Conv2D(n_last_conv_ch//4, (4, 4), strides=1, padding='same')(d_in)
     x = LeakyReLU(alpha=leaky_relu_alpha)(x)
@@ -372,9 +372,10 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
     g_loss = -d_loss_fake
     if label_mode is 'cat':
         g_loss += (lambda_info_sup * info_penalty_fake_cat + lambda_info_unsup * info_penalty_fake_cont)
+        g_trainable_weights = generator.trainable_weights + classifier.trainable_weights[-4:]
     elif label_mode is 'cont':
         g_loss += (lambda_info_sup * info_penalty_fake_cont + lambda_info_unsup * info_penalty_fake_cat)
-    g_trainable_weights = generator.trainable_weights
+        g_trainable_weights = generator.trainable_weights + feature_extractor.trainable_weights[-6:]
     g_train_updates = generator_opt.get_updates(g_trainable_weights, [], g_loss)
     g_train = K.function([gen_in_noise, gen_in_cat, gen_in_cont],
                          [d_loss_fake, info_penalty_fake_cat, info_penalty_fake_cont],
@@ -385,9 +386,10 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
              + lambda_ct * ct_penalty
     if label_mode is 'cat':
         d_loss += (lambda_info_sup * info_penalty_real + lambda_info_unsup * info_penalty_fake_cont)
+        d_trainable_weights = discriminator.trainable_weights + feature_extractor.trainable_weights[-6:]
     elif label_mode is 'cont':
         d_loss += (lambda_info_sup * info_penalty_real + lambda_info_unsup * info_penalty_fake_cat)
-    d_trainable_weights = discriminator.trainable_weights + classifier.trainable_weights[-4:] + feature_extractor.trainable_weights[-6:]
+        d_trainable_weights = discriminator.trainable_weights + classifier.trainable_weights[-4:]
     d_train_updates = discriminator_opt.get_updates(d_trainable_weights, [], d_loss)
     d_train = K.function([real_in, label_in, gen_in_noise, gen_in_cat, gen_in_cont, eps_in],
                          [d_loss_real, d_loss_fake, grad_penalty, ct_penalty, info_penalty_real, info_penalty_fake_cat, info_penalty_fake_cont],
@@ -406,17 +408,17 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
         progbar = generic_utils.Progbar(n_batches*batch_size)
         for ib in range(n_batches):
             # real batch
-            idx_real_batch = idx_randperm[range(ib * batch_size, ib * batch_size + batch_size)]
-            image_real_batch = image_set[idx_real_batch]
+            idx_batch = idx_randperm[range(ib * batch_size, ib * batch_size + batch_size)]
+            image_real_batch = image_set[idx_batch]
             # semi-supervision
             toss = np.random.binomial(1, label_rate)
             if toss > 0:
-                label_real_batch = label_set[idx_real_batch]
+                label_real_batch = label_set[idx_batch]
             else:
                 _, label_real_batch, _ = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
             # fake batch
             noise_disc, label_disc, cont_disc = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
-            # train the discriminator model
+            # train discriminator, classifier and feature extractor
             eps = np.random.uniform(size=(batch_size, 1, 1, 1))
             d_loss_real_train_val,\
             d_loss_fake_train_val,\
@@ -433,7 +435,7 @@ def train_infowgangpct(image_set, label_set, generator, generator_opt, discrimin
                 losses['info_unsupervised'].append(info_penalty_fake_cont_train_val)
             elif label_mode is 'cont':
                 losses['info_unsupervised'].append(info_penalty_fake_cat_train_val)
-            # train generator and classifier
+            # train generator, classifier and feature extractor
             if ((ib + 1) % train_dgratio == 0):
                 noise_gen, label_gen, cont_gen = get_noise(dim_noise, dim_cat, dim_cont, batch_size=batch_size)
                 d_loss_fake_train_val,\
@@ -504,9 +506,9 @@ if __name__ == '__main__':
     dim_noise = 50
     n_class = 10
     n_cont = 2
-    label_rate = 0.1
-    lambda_info_sup = 2
-    lambda_info_unsup = 0.8
+    label_rate = 1
+    lambda_info_sup = 10
+    lambda_info_unsup = 1
 
     # output folder
     output_path = './output/'

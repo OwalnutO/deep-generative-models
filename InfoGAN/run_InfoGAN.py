@@ -92,10 +92,10 @@ def plot_loss(losses, save=False, save_filename=None):
     plt.figure(figsize=(10, 10))
     g_loss = np.array(losses['g'])
     d_loss = np.array(losses['d'])
-    plt.plot(g_loss[:, 1], label='G loss')
-    plt.plot(g_loss[:, 2], label='Q loss')
-    plt.plot(d_loss[:, 0], label='D loss')
-    plt.plot(d_loss[:, 1], label='D mse')
+    c_loss = np.array(losses['c'])
+    plt.plot(g_loss, label='G loss')
+    plt.plot(d_loss, label='D loss')
+    plt.plot(c_loss, label='C loss')
     plt.legend()
     if save:
         if save_filename is not None:
@@ -163,7 +163,7 @@ def build_generator(n_class, n_rows, n_cols, n_out_ch=1, n_first_conv_ch=256, di
     return generator
 
 
-def build_disc_aux(n_class, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=256, leaky_relu_alpha=0.2, lr=1e-4, beta_1=0.5, beta_2=0.9):
+def build_disc_class(n_class, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=256, leaky_relu_alpha=0.2, lr=1e-4, beta_1=0.5, beta_2=0.9):
     d_opt = Adam(lr=lr, beta_1=beta_1, beta_2=beta_2)
     d_in = Input(shape=(n_rows, n_cols, n_in_ch))
     x = Conv2D(n_last_conv_ch//4, (4, 4), strides=1, padding='same')(d_in)
@@ -186,35 +186,34 @@ def build_disc_aux(n_class, n_rows, n_cols, n_in_ch=1, n_last_conv_ch=256, leaky
     x = LeakyReLU(alpha=leaky_relu_alpha)(x)
     c_out_softmax = Dense(n_class, activation='softmax')(x)
 
-    discriminator = Model(d_in, d_out_sigmoid, name='discriminator')
-    discriminator.compile(optimizer=d_opt, loss='binary_crossentropy', metrics=['mean_squared_error'])
-    print('Summary of Discriminator (for InfoGAN)')
-    discriminator.summary()
+    discriminator_classifier = Model(d_in, [d_out_sigmoid, c_out_softmax], name='discriminator_classifier')
+    discriminator_classifier.compile(optimizer=d_opt,
+                                     loss=['binary_crossentropy', 'categorical_crossentropy'],
+                                     loss_weights=[1, 1])
+    print('Summary of Discriminator and Classifier (for InfoGAN)')
+    discriminator_classifier.summary()
 
-    classifier = Model(d_in, c_out_softmax, name='classifier')
-    classifier.compile(optimizer=d_opt, loss='categorical_crossentropy', metrics=['mean_squared_error'])
-    print('Summary of Classifier (for InfoGAN)')
-    classifier.summary()
-
-    return discriminator, classifier
+    return discriminator_classifier
 
 
-def build_infogan(generator, discriminator, classifier, lr=1e-4, beta_1=0.5, beta_2=0.9):
-    gan_opt = Adam(lr=lr, beta_1=beta_1, beta_2=beta_2)
-    gan_in_noise = Input(shape=generator.layers[0].input_shape[1:])
-    gan_in_cat = Input(shape=generator.layers[1].input_shape[1:])
-    gen_out = generator([gan_in_noise, gan_in_cat])
-    set_trainable(discriminator, False)
-    gan_out_sigmoid = discriminator(gen_out)
-    gan_out_softmax = classifier(gen_out)
-    gan = Model([gan_in_noise, gan_in_cat], [gan_out_sigmoid, gan_out_softmax])
-    gan.compile(optimizer=gan_opt, loss=['binary_crossentropy', 'categorical_crossentropy'], loss_weights=[1, 1])
+def build_infogan(generator, discriminator_classifier, lr=1e-4, beta_1=0.5, beta_2=0.9):
+    infogan_opt = Adam(lr=lr, beta_1=beta_1, beta_2=beta_2)
+    infogan_in_noise = Input(shape=generator.layers[0].input_shape[1:])
+    infogan_in_cat = Input(shape=generator.layers[1].input_shape[1:])
+    gen_out = generator([infogan_in_noise, infogan_in_cat])
+    set_trainable(discriminator_classifier, False)
+    infogan_out_sigmoid, infogan_out_softmax = discriminator_classifier(gen_out)
+    gan = Model([infogan_in_noise, infogan_in_cat], [infogan_out_sigmoid, infogan_out_softmax])
+    gan.compile(optimizer=infogan_opt,
+                loss=['binary_crossentropy', 'categorical_crossentropy'],
+                loss_weights=[1, 1])
     print('Summary of the InfoGAN model')
     gan.summary()
     return gan
 
 
-def train_infogan(image_set, generator, discriminator, gan, losses,
+def train_infogan(image_set, label_set, generator, discriminator_classifier, gan, losses,
+                  label_rate=1,
                   batch_size=32,
                   n_epochs=100,
                   save_every=10,
@@ -224,40 +223,46 @@ def train_infogan(image_set, generator, discriminator, gan, losses,
     n_train = image_set.shape[0]
     dim_noise = generator.layers[0].input_shape[1]
     dim_cat = generator.layers[1].input_shape[1]
-    n_ch = discriminator.layers[0].input_shape[-1]
+    n_ch = discriminator_classifier.layers[0].input_shape[-1]
     for ie in range(n_epochs):
         print('epoch: %d' % (ie + 1))
         idx_randperm = np.random.permutation(n_train)
         n_batches = n_train // batch_size
         progbar = generic_utils.Progbar(n_batches*batch_size)
         for ib in range(n_batches):
-            # train discriminator
-            set_trainable(discriminator, True)
-            # train real batch
-            idx_batch = idx_randperm[range(ib*batch_size, ib*batch_size+batch_size)]
-            X_real = image_set[idx_batch]
-            y_real = np.random.uniform(low=1-label_smooth, high=1, size=(batch_size,))  # label smoothing
-            d_loss_real = discriminator.train_on_batch(X_real, y_real)
-            # train fake batch
-            noise_gen, label_gen = get_noise(dim_noise, dim_cat, batch_size=batch_size)  # generate noise and labels
-            X_fake = generator.predict([noise_gen, label_gen])
-            y_fake = np.random.uniform(low=0, high=label_smooth, size=(batch_size,))  # label smoothing
-            d_loss_fake = discriminator.train_on_batch(X_fake, y_fake)
-            # discriminator loss
-            d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
-            losses['d'].append(d_loss)
+            set_trainable(discriminator_classifier, True)
+            if ib % 2 == 0: # pick real batch
+                idx_batch = idx_randperm[range(ib*batch_size, ib*batch_size+batch_size)]
+                X = image_set[idx_batch]
+                y = np.random.uniform(low=1-label_smooth, high=1, size=(batch_size,))  # label smoothing
+                # semi-supervision
+                toss = np.random.binomial(1, label_rate)
+                if toss > 0:
+                    label = label_set[idx_batch]
+                else:
+                    _, label = get_noise(dim_noise, dim_cat, batch_size=batch_size)
+            else: # pick fake batch
+                noise_gen, label_gen = get_noise(dim_noise, dim_cat, batch_size=batch_size)  # generate noise and labels
+                X = generator.predict([noise_gen, label_gen])
+                y = np.random.uniform(low=0, high=label_smooth, size=(batch_size,))  # label smoothing
+                label = label_gen
+            # train discriminator and classifier
+            d_c_loss = discriminator_classifier.train_on_batch(X, [y, label])
+            losses['d'].append(d_c_loss[1])
+            losses['c'].append(d_c_loss[2])
 
             # train generator and classifier
             noise_train, label_train = get_noise(dim_noise, dim_cat, batch_size=batch_size)
             y_one = np.ones((batch_size,), dtype=np.float32)
-            set_trainable(discriminator, False)
-            # generator loss and classifier loss
+            set_trainable(discriminator_classifier, False)
             g_loss = gan.train_on_batch([noise_train, label_train], [y_one, label_train])
-            losses['g'].append(g_loss)
+            losses['g'].append(g_loss[1])
+            losses['c'][-1] += g_loss[2]
 
             # update progress bar
-            progbar.add(batch_size, values=[("G loss", g_loss[1]), ("Q loss", g_loss[2]),
-                                            ("D loss", d_loss[0]), ("D mse", d_loss[1])])
+            progbar.add(batch_size, values=[("G loss", g_loss[1]),
+                                            ("D loss", d_c_loss[1]),
+                                            ("C loss", losses['c'][-1])])
 
         # plot interim results
         if ((ie + 1) % save_every == 0) or (ie == n_epochs - 1):
@@ -278,7 +283,7 @@ def train_infogan(image_set, generator, discriminator, gan, losses,
 
 if __name__ == '__main__':
 
-    losses = {'g': [], 'd': []}
+    losses = {'g': [], 'd': [], 'c': []}
 
     # sanity check on mnist
     from keras.datasets import mnist
@@ -293,7 +298,7 @@ if __name__ == '__main__':
     batch_size = 128
     n_epochs = 100
     n_save_every = 10
-    g_lr = 2e-4
+    g_lr = 1e-3
     g_beta1 = 0.5
     g_beta2 = 0.9
     d_lr = 2e-4
@@ -301,6 +306,7 @@ if __name__ == '__main__':
     d_beta2 = 0.9
     dim_noise = 50
     n_class = 10
+    label_rate = 1
 
     # output folder
     output_path = './output/'
@@ -313,30 +319,31 @@ if __name__ == '__main__':
     generator = build_generator(n_class, n_row, n_col, n_out_ch=n_ch, n_first_conv_ch=256, dim_noise=dim_noise)
     plot_model(generator, to_file='%s_generator_model.pdf' % save_filename_prefix, show_shapes=True)
     # discriminator and classifier
-    discriminator, classifier = build_disc_aux(n_class, n_row, n_col, n_in_ch=n_ch, n_last_conv_ch=256, lr=d_lr)
-    plot_model(discriminator, to_file='%s_discriminator_model.pdf' % save_filename_prefix, show_shapes=True)
-    plot_model(classifier, to_file='%s_classifier_model.pdf' % save_filename_prefix, show_shapes=True)
+    discriminator_classifier = build_disc_class(n_class, n_row, n_col, n_in_ch=n_ch, n_last_conv_ch=256, lr=d_lr)
+    plot_model(discriminator_classifier, to_file='%s_discriminator_classifier_model.pdf' % save_filename_prefix, show_shapes=True)
     # combined InfoGAN network
-    infogan = build_infogan(generator, discriminator, classifier, lr=g_lr)
+    infogan = build_infogan(generator, discriminator_classifier, lr=g_lr)
     plot_model(infogan, to_file='%s_infogan_model.pdf' % save_filename_prefix, show_shapes=True)
-    gan_weights_file = '%s_weights_epoch%d.hdf' % (save_filename_prefix, n_epochs)
-    if path.isfile(gan_weights_file):
+    infogan_weights_file = '%s_weights_epoch%d.hdf' % (save_filename_prefix, n_epochs)
+    if path.isfile(infogan_weights_file):
         # load InfoGAN weights that already existed
         print('loading InfoGAN model weights')
-        infogan.load_weights(gan_weights_file)
+        infogan.load_weights(infogan_weights_file)
     else:
         # train InfoGAN
         print('training InfoGAN model')
-        train_infogan(x_train, generator, discriminator, infogan, losses,
+        y_train = np_utils.to_categorical(y_train, num_classes=n_class)
+        train_infogan(x_train, y_train, generator, discriminator_classifier, infogan, losses,
+                      label_rate=label_rate,
                       batch_size=batch_size,
                       n_epochs=n_epochs,
                       save_every=n_save_every,
                       save_mode=save_mode,
                       save_filename_prefix=save_filename_prefix)
-        infogan.save_weights(gan_weights_file)
+        infogan.save_weights(infogan_weights_file)
 
     # accuracy test
-    y_test_softmax = classifier.predict(x_test)
+    _, y_test_softmax = discriminator_classifier.predict(x_test)
     y_test_pred = np.argmax(y_test_softmax, axis=1)
     acc_pred, w_cluster = cluster_acc(y_test, y_test_pred)
     print('Classifier accuracy: %.4f' % acc_pred)
